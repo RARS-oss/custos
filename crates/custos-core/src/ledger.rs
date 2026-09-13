@@ -12,13 +12,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::event::RawEvent;
+use crate::lockfile::with_lock;
 
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -178,32 +179,6 @@ fn now_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("clock before 1970")
         .as_secs()
-}
-
-/// A create-new-based spin lock: atomic on both POSIX and Windows. Backs off with a deadline and
-/// then proceeds WITHOUT the lock rather than hanging — a stuck/stale lock file (from a crashed
-/// process) must never turn into a hook that never returns.
-fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(lock_path)
-        {
-            Ok(_) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if Instant::now() > deadline {
-                    break; // proceed unlocked rather than hang
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => break, // couldn't even create the lock file -- proceed unlocked
-        }
-    }
-    let result = f();
-    let _ = fs::remove_file(lock_path);
-    result
 }
 
 #[cfg(test)]

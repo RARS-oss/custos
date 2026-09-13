@@ -21,10 +21,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 
-# ledger / hashing -- same versions as bulla-core / vigil-core, since the hash-chain construction
-# is ported from the same place.
+# ledger / receipt / crypto -- same versions as bulla-core / vigil-core, since this is a direct
+# port of that construction.
 sha2 = "0.10"
 hex = "0.4"
+ed25519-dalek = "2"
+getrandom = "0.2"
 
 [profile.release]
 opt-level = 3
