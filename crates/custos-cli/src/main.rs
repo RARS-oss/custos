@@ -44,6 +44,11 @@ enum Cmd {
     Checkpoints(CheckpointsArgs),
     /// Print the public key for a signing seed (creating it if absent).
     Keygen(KeygenArgs),
+    /// Build a digest of raw events and, optionally, condense it further (--llm-command) and/or
+    /// hand it to tabularium (--remember). Never runs automatically inside a hook.
+    Consolidate(ConsolidateArgs),
+    /// Show what's checkpointed vs. still pending, for a fresh session to orient itself.
+    Resume(ResumeArgs),
 }
 
 #[derive(Parser)]
@@ -141,6 +146,47 @@ struct KeygenArgs {
     key: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+struct ConsolidateArgs {
+    /// Only include events for this session id. Default: every session in range.
+    #[arg(long)]
+    session: Option<String>,
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    /// Only events with seq >= this. Default: 0.
+    #[arg(long)]
+    from_seq: Option<u64>,
+    /// Only events with seq <= this. Default: the last event.
+    #[arg(long)]
+    to_seq: Option<u64>,
+    /// Pipe the mechanical digest through this program (stdin -> stdout) for an LLM-assisted
+    /// summary instead of the raw digest -- e.g. a wrapper around `claude -p`. Spawned directly,
+    /// never through a shell string.
+    #[arg(long)]
+    llm_command: Option<PathBuf>,
+    /// Hand the resulting summary to `tabularium remember --kind fact` (requires `tabularium` on
+    /// PATH), piped via stdin -- never as a shell argument.
+    #[arg(long)]
+    remember: bool,
+    #[arg(long)]
+    subject: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct ResumeArgs {
+    #[arg(long)]
+    ledger: Option<PathBuf>,
+    #[arg(long)]
+    checkpoints: Option<PathBuf>,
+    /// Only consider checkpoints touching this session id.
+    #[arg(long)]
+    session: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Hook(a) => {
@@ -153,6 +199,8 @@ fn main() -> Result<()> {
         Cmd::Checkpoint(a) => cmd_checkpoint(a),
         Cmd::Checkpoints(a) => cmd_checkpoints(a),
         Cmd::Keygen(a) => cmd_keygen(a),
+        Cmd::Consolidate(a) => cmd_consolidate(a),
+        Cmd::Resume(a) => cmd_resume(a),
     }
 }
 
@@ -163,7 +211,10 @@ fn cmd_hook(a: HookArgs) {
         eprintln!("custos: failed to read hook stdin: {e}");
         return;
     }
-    let trimmed = raw.trim();
+    // Strip a leading UTF-8 BOM before trimming whitespace: `str::trim` doesn't remove it, and a
+    // caller that writes one (a PowerShell `Get-Content -Encoding UTF8` pipe does) would
+    // otherwise make an otherwise-valid JSON payload fail to parse for no real reason.
+    let trimmed = raw.trim_start_matches('\u{FEFF}').trim();
     let payload: serde_json::Value = if trimmed.is_empty() {
         serde_json::json!({})
     } else {
@@ -188,11 +239,12 @@ fn cmd_hook(a: HookArgs) {
         return;
     }
 
+    let checkpoints_path = hook_args
+        .checkpoints
+        .clone()
+        .unwrap_or_else(cc::CheckpointStore::default_path);
+
     if matches!(kind, "pre_compact" | "session_end") {
-        let checkpoints_path = hook_args
-            .checkpoints
-            .clone()
-            .unwrap_or_else(cc::CheckpointStore::default_path);
         let key_path = hook_args.key.clone().unwrap_or_else(cc::default_key_path);
         match do_checkpoint(kind, ledger_path, checkpoints_path, key_path) {
             Ok(Some(sc)) => eprintln!(
@@ -204,6 +256,16 @@ fn cmd_hook(a: HookArgs) {
             ),
             Ok(None) => {}
             Err(e) => eprintln!("custos: checkpoint failed: {e:#}"),
+        }
+    } else if kind == "session_start" {
+        // Unfiltered by session: this session is brand new and has no history of its own yet --
+        // the useful thing to show is the most recent checkpoint from whatever came before.
+        // stderr only: whether SessionStart's stdout is parsed for a control protocol wasn't
+        // verified (docs/DESIGN.md §3 only confirms fields it provides, not what it accepts
+        // back), so a plain informational hint stays on the side channel rather than risking it.
+        match build_resume_report(&ledger_path, &checkpoints_path, None, false) {
+            Ok(report) => eprintln!("custos resume:\n{report}"),
+            Err(e) => eprintln!("custos: resume report failed: {e:#}"),
         }
     }
 }
@@ -415,6 +477,130 @@ fn cmd_keygen(a: KeygenArgs) -> Result<()> {
     println!("pubkey {}", cc::pubkey_hex(&seed));
     println!("seed   {}", key_path.display());
     Ok(())
+}
+
+/// Deliberately never called from a hook: consolidation is explicit and opt-in, may shell out to
+/// an LLM and/or tabularium, and neither of those belongs inside a "never fail the hook" path.
+fn cmd_consolidate(a: ConsolidateArgs) -> Result<()> {
+    let ledger = cc::Ledger::open(a.ledger.unwrap_or_else(cc::Ledger::default_path));
+    let all = ledger.read_all().context("reading ledger")?;
+    let events: Vec<cc::RawEvent> = all
+        .into_iter()
+        .filter(|e| a.session.as_deref().is_none_or(|s| s == e.session_id))
+        .filter(|e| e.seq >= a.from_seq.unwrap_or(0))
+        .filter(|e| a.to_seq.is_none_or(|t| e.seq <= t))
+        .collect();
+
+    if events.is_empty() {
+        println!("no events matched");
+        return Ok(());
+    }
+
+    let digest = cc::build_digest(&events);
+    let summary = match &a.llm_command {
+        Some(cmd) => cc::run_piped(cmd, &[], &digest)
+            .map_err(anyhow::Error::msg)
+            .context("running --llm-command")?,
+        None => digest.clone(),
+    };
+
+    if a.remember {
+        let mut args: Vec<String> = vec!["remember".into(), "--kind".into(), "fact".into()];
+        if let Some(s) = &a.subject {
+            args.push("--subject".into());
+            args.push(s.clone());
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = cc::run_piped(std::path::Path::new("tabularium"), &arg_refs, &summary)
+            .map_err(anyhow::Error::msg)
+            .context("calling `tabularium remember` -- is `tabularium` on PATH?")?;
+        println!("{}", out.trim());
+        return Ok(());
+    }
+
+    if a.json {
+        println!(
+            "{}",
+            serde_json::json!({"digest": digest, "summary": summary})
+        );
+    } else {
+        println!("{summary}");
+    }
+    Ok(())
+}
+
+fn cmd_resume(a: ResumeArgs) -> Result<()> {
+    let ledger_path = a.ledger.unwrap_or_else(cc::Ledger::default_path);
+    let checkpoints_path = a
+        .checkpoints
+        .unwrap_or_else(cc::CheckpointStore::default_path);
+    println!(
+        "{}",
+        build_resume_report(
+            &ledger_path,
+            &checkpoints_path,
+            a.session.as_deref(),
+            a.json
+        )?
+    );
+    Ok(())
+}
+
+/// Shared by `custos resume` and the `session-start` hook's stderr hint.
+fn build_resume_report(
+    ledger_path: &PathBuf,
+    checkpoints_path: &PathBuf,
+    session: Option<&str>,
+    json: bool,
+) -> Result<String> {
+    let ledger = cc::Ledger::open(ledger_path);
+    let events = ledger.read_all().context("reading ledger")?;
+    let store = cc::CheckpointStore::open(checkpoints_path);
+    let checkpoints = store.read_all().context("reading checkpoints")?;
+
+    let relevant: Vec<&cc::SignedCheckpoint> = checkpoints
+        .iter()
+        .filter(|c| session.is_none_or(|s| c.body.session_ids.iter().any(|x| x == s)))
+        .collect();
+    let last = relevant.last();
+    let last_to_seq = last.map(|c| c.body.to_seq);
+    let pending: Vec<&cc::RawEvent> = events
+        .iter()
+        .filter(|e| last_to_seq.is_none_or(|t| e.seq > t))
+        .collect();
+
+    if json {
+        return Ok(serde_json::json!({
+            "total_checkpoints": checkpoints.len(),
+            "last_checkpoint": last,
+            "total_events": events.len(),
+            "pending_since_last_checkpoint": pending.len(),
+        })
+        .to_string());
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("checkpoints        {}\n", checkpoints.len()));
+    match last {
+        Some(c) => {
+            out.push_str(&format!(
+                "last checkpoint    {} ({})\n",
+                c.body_digest, c.body.trigger
+            ));
+            out.push_str(&format!(
+                "covers             seq {}..={} ({} events)\n",
+                c.body.from_seq, c.body.to_seq, c.body.event_count
+            ));
+            out.push_str(&format!(
+                "sessions           {}\n",
+                c.body.session_ids.join(", ")
+            ));
+        }
+        None => out.push_str("last checkpoint    none yet\n"),
+    }
+    out.push_str(&format!("total raw events   {}\n", events.len()));
+    out.push_str(&format!("pending (uncheckpointed) {}", pending.len()));
+    Ok(out)
 }
 
 /// A short, human-readable preview of a raw hook payload for `custos list`. Tries the field
