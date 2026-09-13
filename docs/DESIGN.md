@@ -56,11 +56,17 @@ Consequently, v1's honest scope:
 
 ## 4. Model
 
-- **Capture.** `UserPromptSubmit` → raw event `kind=user_turn`. `Stop` → raw event
-  `kind=assistant_turn` (`last_assistant_message`). `PostToolUse` → raw event `kind=tool_call`
-  (tool name + a bounded summary of input/output — not necessarily the full payload, to keep the
-  log itself from becoming another unbounded-growth problem). Every event is hash-chained
-  (`prev`/`hash`, bulla's construction) into a per-session log.
+- **Capture.** `UserPromptSubmit`/`Stop`/`PostToolUse`/`SessionStart`/`SessionEnd`/`PreCompact`
+  each map to a raw event named after the hook (`user_prompt_submit`, `stop`, `post_tool_use`,
+  ...). As built, `RawEvent` stores the **entire hook JSON payload verbatim** rather than a
+  bounded summary of named fields — deliberately: §3 found no version-stable schema to extract
+  named fields *against*, so extracting only "the interesting parts" would mean guessing which
+  parts those are. The trade this makes explicit, confirmed live: a real `PostToolUse` payload
+  includes the tool's full `tool_response` (e.g. a `Read`'s entire file content, a `Bash` call's
+  full stdout) — genuinely complete, but genuinely unbounded; a very large tool result makes a
+  very large ledger line. Not addressed in v1 (bounding/redacting large payloads is real future
+  work, not a silent gap). Every event is hash-chained (`prev`/`hash`, bulla's construction) into
+  one running ledger (not per-session — `session_id` is a field on each event, not a file split).
 - **Checkpoint.** On `PreCompact` and on `SessionEnd` (any `why`), close the current chain
   segment and emit a signed receipt (Ed25519, ported from bulla) over exactly which raw events
   it covers — the checkable claim "nothing between the last checkpoint and this one was dropped
@@ -79,12 +85,26 @@ Consequently, v1's honest scope:
 
 - **D1 (capture completeness).** For a real session, the number of raw events custos captured
   via hooks matches the number of turns/tool-calls that actually happened — no silent drops.
+  **Validated live, on this project's own build session** — after wiring the hooks into
+  `.claude/settings.json` mid-session (no restart needed), the very next `PostToolUse` call was
+  captured with the real `session_id`, full `tool_input`, and full `tool_response`. `Stop` and
+  `UserPromptSubmit` fire on the same session going forward.
 - **D2 (checkpoint integrity).** custos's hash-chained log detects a dropped or edited event —
   the same tamper-evidence discipline bulla/tabularium/vigil all carry, applied here.
+  **Validated** — unit tests (`ledger::tests`, `checkpoint::tests`) hand-tamper a byte and confirm
+  `verify_chain` catches it; the same is confirmed live via `custos verify` against a hand-edited
+  ledger file.
 - **D3 (real recovery, the actual point of the project).** After a genuine `/clear`, a fresh
   session can reconstruct a coherent, accurate picture of the prior session from custos's
   checkpoint + raw log alone — validated by actually doing it on this project's own build, the
   same way vigil's C2 was validated against a real target instead of asserted against a mock.
+  **Partially validated, honestly incomplete.** `custos resume`'s stderr hint on `SessionStart`
+  was confirmed correct across a *simulated* session boundary (a scripted `SessionEnd` followed
+  by a scripted `SessionStart` with realistic payloads) — it correctly reported the prior
+  checkpoint's coverage and pending count. What is **not yet done**: triggering a real `/clear`
+  in a live session and confirming a fresh session actually recovers something useful from it.
+  That's a deliberate, user-initiated action (an agent shouldn't invoke `/clear` on its own
+  session mid-task) — recorded here as open, not silently assumed to work.
 
 ## 6. Roadmap
 
@@ -98,6 +118,9 @@ Consequently, v1's honest scope:
 4. **Week 4:** a real dogfooding pilot — run custos on this project's own build sessions, write up
    D1–D3 honestly, misses included, the same way `vigil/docs/pilot/` did.
 
-Status: not started. Read this file, tabularium's `DESIGN.md`/`docs/DOGFOODING-NOTES.md`, and
-vigil's `docs/pilot/` first — same convention every project in this org follows before writing a
-line of code.
+Status (2026-09-13): Weeks 1–3 done (hash-chained capture, signed checkpoints on real lifecycle
+hooks, consolidation into tabularium). Week 4: hooks wired into a live `.claude/settings.json` and
+confirmed firing on a real, ongoing session (D1) without a restart; README written; published at
+[github.com/RARS-oss/custos](https://github.com/RARS-oss/custos). Not done: an actual `/clear` in
+a live session followed by confirming a fresh session recovers something useful (the rest of D3)
+— that step needs the user to trigger `/clear` themselves.
