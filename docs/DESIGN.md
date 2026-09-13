@@ -98,13 +98,22 @@ Consequently, v1's honest scope:
   session can reconstruct a coherent, accurate picture of the prior session from custos's
   checkpoint + raw log alone — validated by actually doing it on this project's own build, the
   same way vigil's C2 was validated against a real target instead of asserted against a mock.
-  **Partially validated, honestly incomplete.** `custos resume`'s stderr hint on `SessionStart`
-  was confirmed correct across a *simulated* session boundary (a scripted `SessionEnd` followed
-  by a scripted `SessionStart` with realistic payloads) — it correctly reported the prior
-  checkpoint's coverage and pending count. What is **not yet done**: triggering a real `/clear`
-  in a live session and confirming a fresh session actually recovers something useful from it.
-  That's a deliberate, user-initiated action (an agent shouldn't invoke `/clear` on its own
-  session mid-task) — recorded here as open, not silently assumed to work.
+  **Validated live, with one confirmed negative result.** On 2026-09-13, the user ran a real
+  `/clear` on this project's own vigil session (not simulated): `SessionEnd` fired with
+  `reason: "clear"` on the old session (`2119e360...`), a signed checkpoint was created covering
+  seq 0..=22, and `SessionStart` fired with `source: "clear"` on the new session (`d4ef3377...`).
+  `custos verify` confirmed the ledger and checkpoint chains stayed intact across the boundary.
+  Querying `custos info`/`resume`/`list` and `tabularium recall` from the fresh session
+  reconstructed an accurate picture of the prior session — including the exact plan the prior
+  session had stated in its last `Stop` event before instructing the user to clear — matching the
+  raw log byte-for-byte. **The negative result:** this reconstruction required the fresh session
+  to actively run those commands; the `SessionStart` resume hint that fired automatically was
+  never seen, because (per §4/code) it's deliberately written to **stderr only**, not surfaced as
+  agent-visible context. So "a fresh session can reconstruct the prior session" is now confirmed
+  true — but "automatically, without being told to look" is confirmed **false** as currently
+  built. Closing that gap means either verifying Claude Code does parse `SessionStart` stdout as
+  additional context (§4's open question) and switching to it, or exposing `custos resume` as an
+  MCP tool the agent is instructed to call at session start.
 
 ## 6. Roadmap
 
@@ -118,9 +127,11 @@ Consequently, v1's honest scope:
 4. **Week 4:** a real dogfooding pilot — run custos on this project's own build sessions, write up
    D1–D3 honestly, misses included, the same way `vigil/docs/pilot/` did.
 
-Status (2026-09-13): Weeks 1–3 done (hash-chained capture, signed checkpoints on real lifecycle
-hooks, consolidation into tabularium). Week 4: hooks wired into a live `.claude/settings.json` and
-confirmed firing on a real, ongoing session (D1) without a restart; README written; published at
-[github.com/RARS-oss/custos](https://github.com/RARS-oss/custos). Not done: an actual `/clear` in
-a live session followed by confirming a fresh session recovers something useful (the rest of D3)
-— that step needs the user to trigger `/clear` themselves.
+Status (2026-09-13): Weeks 1–4 done. Hooks wired into a live `.claude/settings.json` and confirmed
+firing on a real, ongoing session (D1) without a restart; README written; published at
+[github.com/RARS-oss/custos](https://github.com/RARS-oss/custos). A real `/clear` was triggered
+live in that same session and the fresh session's recovery was confirmed working end-to-end (D3)
+— with one honest miss found by doing it for real instead of assuming: the `SessionStart` hint is
+stderr-only and never reaches the agent automatically, so recovery today is "possible on request,"
+not "automatic." See §5/D3 for the full result. Next: fix the automatic-surfacing gap, then move to
+the next project in build-priority-order (arbiter).
