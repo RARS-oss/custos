@@ -84,11 +84,20 @@ custos consolidate --session <id> --remember --subject session.2026-09-13
 - **`custos consolidate --remember` really writes to tabularium** — piped via stdin, not a shell
   argument (this agent's own session got bitten by exactly that class of bug elsewhere; see
   `docs/DESIGN.md`).
+- **A real `/clear` was survived, checkably.** Triggering an actual `/clear` on a live session
+  produced `SessionEnd(reason="clear")` on the old session, a signed checkpoint over everything up
+  to that point, and `SessionStart(source="clear")` on the new one, with `custos verify` confirming
+  the ledger and checkpoint chains stayed intact across the boundary — and the fresh session used
+  `custos info`/`resume`/`list` plus tabularium to reconstruct the prior session's exact state.
+  **Honest gap:** that reconstruction was done on request, not automatically — the `SessionStart`
+  hint is currently stderr-only and never reaches the agent's context by itself. See
+  `docs/DESIGN.md` §5 (D3) for the full result.
 
 ## Status
 
-Weeks 1–3 done: hash-chained capture, signed checkpoints triggered by real lifecycle hooks,
-consolidation into tabularium. Week 4 (this README, hooks wired into a live session, GitHub) in
-progress — see `docs/DESIGN.md` for the roadmap and the honest claims (D1–D3).
+Weeks 1–4 done: hash-chained capture, signed checkpoints triggered by real lifecycle hooks,
+consolidation into tabularium, and a real `/clear` triggered live with recovery confirmed
+end-to-end (D3) — see `docs/DESIGN.md` for the full claims (D1–D3) and the one open gap
+(automatic surfacing of the resume hint, currently stderr-only).
 
 License: MIT OR Apache-2.0.
