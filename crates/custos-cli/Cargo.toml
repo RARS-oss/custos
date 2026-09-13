@@ -1,0 +1,17 @@
+[package]
+name = "custos-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "custos: Claude Code hook entry points (capture) + verify/list/info"
+
+[[bin]]
+name = "custos"
+path = "src/main.rs"
+
+[dependencies]
+custos-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true

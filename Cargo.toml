@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/custos-core",
+    "crates/custos-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RARS-oss/custos"
+description = "custos: continuous, hook-driven session capture so an agent's history survives Claude Code's own context compaction and /clear"
+
+[workspace.dependencies]
+custos-core = { path = "crates/custos-core", version = "0.1.0" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+# ledger / hashing -- same versions as bulla-core / vigil-core, since the hash-chain construction
+# is ported from the same place.
+sha2 = "0.10"
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
